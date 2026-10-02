@@ -60,8 +60,8 @@ cc1101:
   frequency: 868.35MHz
   modulation_type: 2-FSK
   symbol_rate: 11111
-  fsk_deviation: 70kHz
-  filter_bandwidth: 100kHz
+  fsk_deviation: 38kHz
+  filter_bandwidth: 203kHz
 
 remote_receiver:
   id: rf_receiver
@@ -69,6 +69,9 @@ remote_receiver:
   pin: GPIO12
   filter: 65us
   idle: 2000us
+  # Room for the whole ~85 ms burst, which carries the frame twice. The
+  # default (192) cuts it off after the first copy.
+  receive_symbols: 512
 
 vevor_decoder:
   receiver_id: rf_receiver

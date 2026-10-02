@@ -25,7 +25,6 @@ static const uint8_t SYNC_WORD[16] = {
 // that many bits is not worth converting. The real filtering is done by the
 // sync word and the checksum.
 static const int MIN_RAW_TIMINGS = 40;
-static const int MIN_FIRST_MARK_US = 1000;
 static const int MIN_DECODED_BITS = 16 + FRAME_BITS;
 // A run longer than this many bit periods is a gap between bursts rather than
 // payload. It has to be generous: NRZ payload legitimately contains long runs
@@ -130,11 +129,10 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
   const auto &raw = src.get_raw_data();
   const int raw_size = (int) raw.size();
 
-  // Vevor bursts are long and open with a long mark.
+  // Vevor bursts are long. Don't judge them by how they start: on a weak or
+  // slightly off-frequency signal the burst opens with noise, and the frame
+  // after it can still be perfectly good.
   if (raw_size < MIN_RAW_TIMINGS)
-    return false;
-  const int32_t first = raw[0] > 0 ? raw[0] : -raw[0];
-  if (first < MIN_FIRST_MARK_US)
     return false;
 
   const int bit_count = this->timings_to_bits_(raw);

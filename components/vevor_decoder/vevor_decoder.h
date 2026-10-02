@@ -14,9 +14,10 @@
 namespace esphome {
 namespace vevor_decoder {
 
-// Frames are 21 bytes (168 bits) after the sync word. Allow room for the
-// preamble plus a couple of repeats so the sync search has somewhere to look.
-static const int MAX_BITS = 512;
+// Frames are 21 bytes (168 bits) after the sync word. A burst lasts ~85 ms
+// (~940 bits) and carries the frame twice; room for all of it means a bit
+// error in the first copy still leaves the second one to decode.
+static const int MAX_BITS = 1024;
 
 // Sentinel for "accept any station id".
 static const int32_t SENSOR_ID_ANY = -1;
