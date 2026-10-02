@@ -142,6 +142,7 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
   // Search for the sync word in both polarities: which one a given receiver
   // produces depends on how the FSK demodulator is wired up.
   const int limit = bit_count - 16 - FRAME_BITS;
+  int sync_matches = 0;
   for (int i = 0; i < limit; i++) {
     for (uint8_t inv = 0; inv < 2; inv++) {
       bool match = true;
@@ -153,6 +154,7 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
       }
       if (!match)
         continue;
+      sync_matches++;
 
       uint8_t frame[FRAME_BYTES];
       if (!this->extract_frame_(i + 16, inv, frame))
@@ -168,6 +170,26 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
       return true;
     }
   }
+
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  // One line per undecodable burst, with the bits it produced. remote_receiver's
+  // own VERY_VERBOSE dump of the same burst is hundreds of lines and the logger
+  // drops some of them, so this is the way to look at a failing burst.
+  static const char HEX_DIGITS[] = "0123456789abcdef";
+  char hex[MAX_BITS / 4 + 1];
+  const int nibbles = (bit_count + 3) / 4;
+  for (int n = 0; n < nibbles; n++) {
+    uint8_t v = 0;
+    for (int m = 0; m < 4; m++) {
+      const int k = n * 4 + m;
+      v = (v << 1) | (k < bit_count ? this->bits_[k] : 0);
+    }
+    hex[n] = HEX_DIGITS[v];
+  }
+  hex[nibbles] = '\0';
+  ESP_LOGV(TAG, "Burst not decoded: %d timings, %d bits, %d sync matches; bits: %s", raw_size, bit_count,
+           sync_matches, hex);
+#endif
   return false;
 }
 
