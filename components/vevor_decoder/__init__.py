@@ -135,7 +135,10 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     receiver = await cg.get_variable(config[CONF_RECEIVER_ID])
-    cg.add(var.set_receiver(receiver))
+    if hasattr(remote_base, "add_dumper"):
+        remote_base.add_dumper(receiver, var)
+    else:
+        cg.add(receiver.register_dumper(var))
 
     # -1 is the "accept any station" sentinel on the C++ side.
     cg.add(var.set_sensor_id(config.get(CONF_SENSOR_ID, -1)))

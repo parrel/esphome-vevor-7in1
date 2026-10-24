@@ -24,8 +24,6 @@ static const int32_t SENSOR_ID_ANY = -1;
 
 class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperBase {
  public:
-  void set_receiver(remote_receiver::RemoteReceiverComponent *receiver) { this->receiver_ = receiver; }
-
   void set_temperature_sensor(sensor::Sensor *s) { this->temperature_ = s; }
   void set_humidity_sensor(sensor::Sensor *s) { this->humidity_ = s; }
   void set_wind_speed_sensor(sensor::Sensor *s) { this->wind_speed_ = s; }
@@ -46,7 +44,6 @@ class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperB
   void set_illuminance_filter(bool enabled) { this->illuminance_filter_ = enabled; }
 
   float get_setup_priority() const override { return setup_priority::DATA; }
-  void setup() override;
   void dump_config() override;
   bool dump(remote_base::RemoteReceiveData src) override;
 
@@ -58,8 +55,6 @@ class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperB
   // the header and checksum. Returns true if the frame is sound.
   bool extract_frame_(int bit_offset, uint8_t inv, uint8_t *out);
   void publish_frame_(const uint8_t *b);
-
-  remote_receiver::RemoteReceiverComponent *receiver_{nullptr};
 
   sensor::Sensor *temperature_{nullptr};
   sensor::Sensor *humidity_{nullptr};

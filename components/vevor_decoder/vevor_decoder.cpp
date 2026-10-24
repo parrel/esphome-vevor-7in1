@@ -53,11 +53,6 @@ static const float WIND_SCALE = 8.333f;     // counts per km/h
 static const float GUST_SCALE = 1.25f;      // counts per km/h
 static const float RAIN_SCALE = 0.233f;     // mm per counter tick
 
-void VevorDecoder::setup() {
-  this->receiver_->register_dumper(this);
-  ESP_LOGD(TAG, "Registered with remote_receiver");
-}
-
 void VevorDecoder::dump_config() {
   ESP_LOGCONFIG(TAG, "Vevor 7-in-1 Weather Station Decoder:");
   if (this->sensor_id_ == SENSOR_ID_ANY) {
