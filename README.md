@@ -4,7 +4,8 @@ An ESPHome external component that decodes the 868/915 MHz FSK telegrams sent by
 Vevor 7-in-1 weather stations (also sold under other brands using the same
 protocol) and publishes them as native ESPHome sensors.
 
-It requires `remote_receiver`.
+Input comes from a CC1101 in packet mode (recommended) or from
+`remote_receiver`.
 
 > **Before you buy anything:** you need a CC1101 module for the **868 MHz**
 > band *with an 868 MHz antenna* (915 MHz for US stations). The 433 MHz modules
@@ -29,20 +30,13 @@ All of them are optional; leave out the ones you don't want.
 
 ## Hardware
 
-You need a receiver that hands ESPHome a **demodulated** FSK bitstream on a
-GPIO — a bare 433 MHz OOK module will not work, and neither will an SX1276 in
-packet mode. A CC1101 is the usual choice, driven by ESPHome's built-in
-`cc1101` component:
-
 - CC1101 module **for the 868 MHz band** (EU) — or 915 MHz if your station is a
-  US model. See the warning below: the band matters, and so does the antenna.
-- SPI wired to the ESP32, plus the module's data output (GDO0 or GDO2) to the
-  GPIO named in `remote_receiver`
-
-The `cc1101` component puts the radio into asynchronous 2-FSK mode, after which
-it streams demodulated bits at the data pin and this component takes over.
+  US model. See the warning above: the band matters, and so does the antenna.
+- SPI wired to the ESP32, plus the module's **GDO0** pin to a free GPIO.
 
 ## Configuration
+
+Packet mode needs ESPHome **2026.2 or newer**.
 
 ```yaml
 external_components:
@@ -55,26 +49,23 @@ spi:
   miso_pin: GPIO19
 
 cc1101:
+  id: radio
   cs_pin: GPIO15
-  # 868.35 MHz is the EU band; use 915 MHz for a US station.
+  gdo0_pin: GPIO12
+  # 915 MHz for a US station.
   frequency: 868.35MHz
   modulation_type: 2-FSK
-  symbol_rate: 11111
+  symbol_rate: 11260
   fsk_deviation: 38kHz
   filter_bandwidth: 203kHz
-
-remote_receiver:
-  id: rf_receiver
-  # The CC1101's data output pin.
-  pin: GPIO12
-  filter: 65us
-  idle: 2000us
-  # Room for the whole ~85 ms burst, which carries the frame twice. The
-  # default (192) cuts it off after the first copy.
-  receive_symbols: 512
+  foc_bs_cs_gate: false
+  packet_mode: true
+  packet_length: 21
+  sync1: 0xCA
+  sync0: 0x54
 
 vevor_decoder:
-  receiver_id: rf_receiver
+  cc1101_id: radio
   # Set this once you have seen your station's id in the logs, so a
   # neighbour's station cannot feed data into your sensors.
   #sensor_id: 0x1A2B
@@ -101,17 +92,63 @@ vevor_decoder:
 
 Every sensor is optional; leave out the ones you do not want.
 
+### Radio settings
+
+Packet mode is less forgiving than `remote_receiver`:
+
+- **`frequency`**: 50 kHz off loses every frame. If nothing decodes, try 25 kHz
+  steps around 868.35 MHz.
+- **`symbol_rate: 11260`**: the station's measured rate; 11111 slips bits.
+- **`foc_bs_cs_gate: false`**: otherwise frequency correction and clock
+  recovery stay frozen and frames arrive corrupted.
+- **`sync1`/`sync0`**: if nothing decodes, try the inverted `0x35` / `0xAB`.
+
+The build rejects a `cc1101` block that cannot receive Vevor frames. Each
+decoded frame logs the signal quality:
+
+```
+[D][vevor_decoder]: [1A2B] Signal: RSSI -85.5 dBm, frequency offset +9.5 kHz, LQI 45
+```
+
+### Alternative: remote_receiver
+
+The original input, kept for existing setups, older ESPHome versions and
+wiring on GDO2. Some setups never receive a frame this way.
+
+```yaml
+cc1101:
+  cs_pin: GPIO15
+  frequency: 868.35MHz
+  modulation_type: 2-FSK
+  symbol_rate: 11111
+  fsk_deviation: 38kHz
+  filter_bandwidth: 203kHz
+
+remote_receiver:
+  id: rf_receiver
+  pin: GPIO12
+  filter: 65us
+  idle: 2000us
+  # The default (192) cuts the burst off after the first copy.
+  receive_symbols: 512
+
+vevor_decoder:
+  receiver_id: rf_receiver
+  # ...sensors as above
+```
+
 ### Options
 
-- **`receiver_id`** (*optional*, ID): the `remote_receiver` to attach to.
-  Defaults to the only one in your configuration.
+- **`cc1101_id`** (*optional*, ID): the `cc1101` to use in packet mode.
+- **`receiver_id`** (*optional*, ID): the `remote_receiver` to use instead.
+  Without either, the only `remote_receiver` is used, else the only `cc1101`.
 - **`sensor_id`** (*optional*, 0–0xFFFF): only publish frames from this station
   id. **Set this.** Without it, a neighbour's station on the same protocol will
   silently overwrite your readings. Leave it out for the first run, read the id
   out of the logs, then add it.
-- **`bit_period`** (*optional*, time, default `90us`): the on-air NRZ bit
-  period. Only worth touching if your receiver's timing is skewed and frames
-  never validate.
+- **`bit_period`** (*optional*, time, default `90us`): `remote_receiver` only.
+  The on-air NRZ bit period. Only worth touching if your receiver's timing is
+  skewed and frames never validate.
 - **`rain_hold`** (*optional*, boolean, default `true`): rain is a counter that
   can only climb, or restart at exactly zero after a battery pull. A frame
   reporting any *other* lower total is corrupt and is never accepted, however

@@ -1,28 +1,46 @@
 #pragma once
 // Vevor 7-in-1 Weather Station decoder for ESPHome.
 //
-// Hooks into remote_receiver as a dumper and decodes the FSK-demodulated
-// output of a CC1101 (or similar) 868/915 MHz receiver. The decode path does
-// no heap allocation.
+// Input is either CC1101 packet mode (the radio delivers the 21-byte frame) or
+// remote_receiver (bits rebuilt from mark/space timings). Each path is only
+// compiled in when the configuration uses it.
 
 #include "esphome/core/component.h"
+#include "esphome/core/defines.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
-#include "esphome/components/remote_base/remote_base.h"
-#include "esphome/components/remote_receiver/remote_receiver.h"
 #include "esphome/components/sensor/sensor.h"
+
+#ifdef USE_VEVOR_DECODER_CC1101
+#include "esphome/components/cc1101/cc1101.h"
+#endif
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
+#include "esphome/components/remote_base/remote_base.h"
+#endif
+
+#include <vector>
 
 namespace esphome {
 namespace vevor_decoder {
 
-// Frames are 21 bytes (168 bits) after the sync word. A burst lasts ~85 ms
-// (~940 bits) and carries the frame twice; room for all of it means a bit
-// error in the first copy still leaves the second one to decode.
+// 0xAA header, 17 data bytes, counter, checksum, counter + 1.
+static const int FRAME_BYTES = 21;
+
+// remote_receiver: room for a whole ~85 ms burst (~940 bits, two frame copies).
 static const int MAX_BITS = 1024;
 
 // Sentinel for "accept any station id".
 static const int32_t SENSOR_ID_ANY = -1;
 
-class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperBase {
+// clang-format off
+class VevorDecoder : public Component
+#ifdef USE_VEVOR_DECODER_CC1101
+                   , public cc1101::CC1101Listener
+#endif
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
+                   , public remote_base::RemoteReceiverDumperBase
+#endif
+{
+  // clang-format on
  public:
   void set_temperature_sensor(sensor::Sensor *s) { this->temperature_ = s; }
   void set_humidity_sensor(sensor::Sensor *s) { this->humidity_ = s; }
@@ -43,18 +61,36 @@ class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperB
   // Drop illuminance readings that contradict the UV index in the same frame.
   void set_illuminance_filter(bool enabled) { this->illuminance_filter_ = enabled; }
 
+  // Frames come from CC1101 packet mode rather than remote_receiver.
+  void set_packet_input(bool packet_input) { this->packet_input_ = packet_input; }
+
   float get_setup_priority() const override { return setup_priority::DATA; }
   void dump_config() override;
+
+#ifdef USE_VEVOR_DECODER_CC1101
+  void on_packet(const std::vector<uint8_t> &packet, float freq_offset, float rssi, uint8_t lqi) override;
+#endif
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
   bool dump(remote_base::RemoteReceiveData src) override;
+#endif
 
  protected:
+  enum class FrameResult { PUBLISHED, DUPLICATE, FILTERED };
+
+  // Header, checksum and counter.
+  static bool frame_valid_(const uint8_t *b);
+  // Station filter and duplicate suppression, then publish.
+  FrameResult handle_frame_(const uint8_t *frame);
+  void publish_frame_(const uint8_t *b);
+
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
   // Turns the raw mark/space timings into NRZ bits in bits_.
   // Returns the number of bits produced.
   int timings_to_bits_(const std::vector<int32_t> &raw);
   // Reads 21 bytes starting at bit offset, applying inversion, and verifies
-  // the header and checksum. Returns true if the frame is sound.
+  // them with frame_valid_(). Returns true if the frame is sound.
   bool extract_frame_(int bit_offset, uint8_t inv, uint8_t *out);
-  void publish_frame_(const uint8_t *b);
+#endif
 
   sensor::Sensor *temperature_{nullptr};
   sensor::Sensor *humidity_{nullptr};
@@ -67,11 +103,19 @@ class VevorDecoder : public Component, public remote_base::RemoteReceiverDumperB
   binary_sensor::BinarySensor *battery_{nullptr};
 
   int32_t sensor_id_{SENSOR_ID_ANY};
+  bool packet_input_{false};
   uint32_t bit_period_{90};
   bool rain_hold_{true};
   bool illuminance_filter_{true};
 
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
   uint8_t bits_[MAX_BITS];  // fixed array, no heap allocation
+#endif
+
+  // Last published frame, to drop the burst's second copy.
+  uint8_t last_frame_[FRAME_BYTES]{};
+  uint32_t last_frame_ms_{0};
+  bool have_last_frame_{false};
 
   // Rain is a monotonic tick counter: it climbs, or it restarts at exactly zero
   // after a battery pull. Any other decrease is corruption - typically the
