@@ -106,8 +106,8 @@ Every sensor is optional; leave out the ones you do not want.
 
 Packet mode is less forgiving than `remote_receiver`:
 
-- **`frequency`**: 50 kHz off loses every frame. If nothing decodes, try 25 kHz
-  steps around 868.35 MHz.
+- **`frequency`**: must be within 50 kHz of the station; see
+  [Troubleshooting](#troubleshooting).
 - **`symbol_rate: 11260`**: the station's measured rate; 11111 slips bits.
 - **`foc_bs_cs_gate: false`**: otherwise frequency correction and clock
   recovery stay frozen and frames arrive corrupted.
@@ -222,6 +222,26 @@ Leave `sensor_id` out, set the logger to `DEBUG`, and watch for lines like:
 `1A2B` is the id to put in your config. Stations of this kind generally pick a
 new id each time they power up, so expect to update this after a battery
 change — check the logs again rather than assuming it survived.
+
+## Troubleshooting
+
+Stations are often well off their nominal frequency (70 kHz has been seen),
+while the CC1101 only corrects up to ±50 kHz. Set the logger to `VERBOSE` and
+compare with:
+
+- **Nothing at all, not even `Packet rejected` lines:** check the wiring,
+  especially GDO0 to `gdo0_pin`.
+- **Only `Packet rejected` lines with random bytes, RSSI around −100 dBm, at
+  irregular times:** the radio works but never finds the station. Step
+  `frequency` from 868.25 to 868.45 MHz in 25 kHz steps, a minute each.
+- **Frames decode:** fine-tune `frequency` until the logged frequency offset is
+  within a few kHz. An offset near ±49 kHz is the correction's limit, so the
+  station is further out than shown. LQI drops (lower is better) as you get
+  closer.
+- **`Packet rejected` every 20 s with a strong RSSI:** the station is received
+  but corrupted; check `symbol_rate: 11260` and `foc_bs_cs_gate: false`.
+- **`remote_receiver` with "0 sync matches" on every burst:** usually the same
+  frequency problem. Packet mode shows the offset, which makes it easy to find.
 
 ## License
 
