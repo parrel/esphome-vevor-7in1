@@ -15,10 +15,13 @@ from esphome.const import (
     DEVICE_CLASS_ILLUMINANCE,
     DEVICE_CLASS_PRECIPITATION,
     DEVICE_CLASS_TEMPERATURE,
+    DEVICE_CLASS_SIGNAL_STRENGTH,
     DEVICE_CLASS_WIND_SPEED,
+    ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
     UNIT_CELSIUS,
+    UNIT_DECIBEL_MILLIWATT,
     UNIT_DEGREES,
     UNIT_KILOMETER_PER_HOUR,
     UNIT_LUX,
@@ -65,6 +68,15 @@ CONF_RAIN = "rain"
 CONF_UV_INDEX = "uv_index"
 CONF_ILLUMINANCE = "illuminance"
 CONF_BATTERY_LOW = "battery_low"
+CONF_RSSI = "rssi"
+CONF_FREQUENCY_OFFSET = "frequency_offset"
+CONF_LINK_QUALITY = "link_quality"
+# Radio diagnostics, only available in packet mode.
+SIGNAL_SENSORS = {
+    CONF_RSSI: "set_rssi_sensor",
+    CONF_FREQUENCY_OFFSET: "set_frequency_offset_sensor",
+    CONF_LINK_QUALITY: "set_link_quality_sensor",
+}
 
 # Accepts 0x1A2B as well as a plain integer; the station id is 16 bits.
 SENSOR_ID_SCHEMA = cv.All(cv.hex_int, cv.Range(min=0, max=0xFFFF))
@@ -89,18 +101,21 @@ def _validate_input(config):
             "Use either cc1101_id (packet mode) or receiver_id "
             "(remote_receiver), not both"
         )
-    if CONF_CC1101_ID in config or CONF_RECEIVER_ID in config:
-        return config
-    # Prefer remote_receiver so existing configurations keep working.
-    if (
-        "remote_receiver" not in CORE.loaded_integrations
-        and "cc1101" in CORE.loaded_integrations
-    ):
-        config[CONF_CC1101_ID] = _cc1101_id(None)
-    else:
-        config[CONF_RECEIVER_ID] = cv.use_id(remote_receiver.RemoteReceiverComponent)(
-            None
-        )
+    if CONF_CC1101_ID not in config and CONF_RECEIVER_ID not in config:
+        # Prefer remote_receiver so existing configurations keep working.
+        if (
+            "remote_receiver" not in CORE.loaded_integrations
+            and "cc1101" in CORE.loaded_integrations
+        ):
+            config[CONF_CC1101_ID] = _cc1101_id(None)
+        else:
+            config[CONF_RECEIVER_ID] = cv.use_id(
+                remote_receiver.RemoteReceiverComponent
+            )(None)
+    if CONF_RECEIVER_ID in config:
+        for key in SIGNAL_SENSORS:
+            if key in config:
+                raise cv.Invalid(f"{key} needs packet mode (cc1101_id)", path=[key])
     return config
 
 
@@ -167,6 +182,26 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_BATTERY_LOW): binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_BATTERY,
+        ),
+        cv.Optional(CONF_RSSI): sensor.sensor_schema(
+            unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_SIGNAL_STRENGTH,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_FREQUENCY_OFFSET): sensor.sensor_schema(
+            unit_of_measurement="kHz",
+            accuracy_decimals=1,
+            icon="mdi:sine-wave",
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_LINK_QUALITY): sensor.sensor_schema(
+            accuracy_decimals=0,
+            icon="mdi:signal",
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -267,7 +302,7 @@ async def to_code(config):
     cg.add(var.set_rain_hold(config[CONF_RAIN_HOLD]))
     cg.add(var.set_illuminance_filter(config[CONF_ILLUMINANCE_FILTER]))
 
-    for key, setter in SENSORS.items():
+    for key, setter in {**SENSORS, **SIGNAL_SENSORS}.items():
         if key in config:
             sens = await sensor.new_sensor(config[key])
             cg.add(getattr(var, setter)(sens))

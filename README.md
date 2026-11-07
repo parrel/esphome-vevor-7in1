@@ -25,8 +25,12 @@ Input comes from a CC1101 in packet mode (recommended) or from
 | `uv_index` | sensor | index |
 | `illuminance` | sensor | lx |
 | `battery_low` | binary sensor | — |
+| `rssi` | sensor, packet mode | dBm |
+| `frequency_offset` | sensor, packet mode | kHz |
+| `link_quality` | sensor, packet mode | LQI (lower is better) |
 
-All of them are optional; leave out the ones you don't want.
+All of them are optional; leave out the ones you don't want. The last three are
+diagnostics from the radio, handy when tuning `frequency` or the antenna.
 
 ## Hardware
 
@@ -88,6 +92,12 @@ vevor_decoder:
     name: "Illuminance"
   battery_low:
     name: "Weather Station Battery Low"
+  rssi:
+    name: "Weather Station RSSI"
+  frequency_offset:
+    name: "Weather Station Frequency Offset"
+  link_quality:
+    name: "Weather Station Link Quality"
 ```
 
 Every sensor is optional; leave out the ones you do not want.
