@@ -1,9 +1,14 @@
 """Vevor 7-in-1 Weather Station decoder for ESPHome."""
 
+import logging
+
+from esphome import final_validate as fv
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import binary_sensor, remote_base, remote_receiver, sensor
+from esphome.core import CORE
 from esphome.const import (
+    __version__ as ESPHOME_VERSION,
     CONF_ID,
     DEVICE_CLASS_BATTERY,
     DEVICE_CLASS_HUMIDITY,
@@ -21,10 +26,21 @@ from esphome.const import (
     UNIT_PERCENT,
 )
 
+try:
+    from esphome.components import cc1101
+except ImportError:  # ESPHome without a cc1101 component
+    cc1101 = None
+
+_LOGGER = logging.getLogger(__name__)
+
 CODEOWNERS = ["@parrel"]
-DEPENDENCIES = ["remote_receiver"]
 AUTO_LOAD = ["sensor", "binary_sensor"]
 MULTI_CONF = True
+
+# Packet mode needs the cc1101 listener interface (ESPHome 2026.2).
+HAS_CC1101_LISTENER = cc1101 is not None and cv.Version.parse(
+    ESPHOME_VERSION
+) >= cv.Version(2026, 2, 0)
 
 vevor_ns = cg.esphome_ns.namespace("vevor_decoder")
 VevorDecoder = vevor_ns.class_(
@@ -34,6 +50,7 @@ VevorDecoder = vevor_ns.class_(
 )
 
 CONF_RECEIVER_ID = "receiver_id"
+CONF_CC1101_ID = "cc1101_id"
 CONF_SENSOR_ID = "sensor_id"
 CONF_BIT_PERIOD = "bit_period"
 CONF_RAIN_HOLD = "rain_hold"
@@ -52,12 +69,48 @@ CONF_BATTERY_LOW = "battery_low"
 # Accepts 0x1A2B as well as a plain integer; the station id is 16 bits.
 SENSOR_ID_SCHEMA = cv.All(cv.hex_int, cv.Range(min=0, max=0xFFFF))
 
+FRAME_BYTES = 21
+SYNC_WORDS = {(0xCA, 0x54), (0x35, 0xAB)}  # normal and inverted polarity
+MEASURED_SYMBOL_RATE = 11260
+
+
+def _cc1101_id(value):
+    if not HAS_CC1101_LISTENER:
+        raise cv.Invalid(
+            "cc1101_id (packet mode) needs ESPHome 2026.2 or newer; "
+            "update ESPHome or use receiver_id with remote_receiver instead"
+        )
+    return cv.use_id(cc1101.CC1101Component)(value)
+
+
+def _validate_input(config):
+    if CONF_CC1101_ID in config and CONF_RECEIVER_ID in config:
+        raise cv.Invalid(
+            "Use either cc1101_id (packet mode) or receiver_id "
+            "(remote_receiver), not both"
+        )
+    if CONF_CC1101_ID in config or CONF_RECEIVER_ID in config:
+        return config
+    # Prefer remote_receiver so existing configurations keep working.
+    if (
+        "remote_receiver" not in CORE.loaded_integrations
+        and "cc1101" in CORE.loaded_integrations
+    ):
+        config[CONF_CC1101_ID] = _cc1101_id(None)
+    else:
+        config[CONF_RECEIVER_ID] = cv.use_id(remote_receiver.RemoteReceiverComponent)(
+            None
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(VevorDecoder),
-        cv.GenerateID(CONF_RECEIVER_ID): cv.use_id(
+        cv.Optional(CONF_RECEIVER_ID): cv.use_id(
             remote_receiver.RemoteReceiverComponent
         ),
+        cv.Optional(CONF_CC1101_ID): _cc1101_id,
         cv.Optional(CONF_SENSOR_ID): SENSOR_ID_SCHEMA,
         cv.Optional(CONF_BIT_PERIOD, default="90us"): cv.All(
             cv.positive_time_period_microseconds,
@@ -117,6 +170,67 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _validate_input)
+
+
+def _check_radio(config):
+    """Reject a cc1101 block that cannot deliver Vevor frames; these fail silently."""
+    full = fv.full_config.get()
+    radio = full.get_config_for_path(full.get_path_for_id(config[CONF_CC1101_ID])[:-1])
+    name = config[CONF_CC1101_ID].id
+
+    def need(ok, message):
+        if not ok:
+            raise cv.Invalid(f"cc1101 '{name}': {message}")
+
+    need(radio.get("packet_mode", False), "set packet_mode: true for cc1101_id")
+    need(
+        radio.get("packet_length") == FRAME_BYTES,
+        f"set packet_length: {FRAME_BYTES}, the Vevor frame length",
+    )
+    sync = (radio.get("sync1"), radio.get("sync0"))
+    need(
+        sync in SYNC_WORDS,
+        "set sync1: 0xCA and sync0: 0x54, the Vevor sync word "
+        "(or 0x35 / 0xAB if your radio demodulates inverted)",
+    )
+    need(str(radio.get("sync_mode")) != "None", "sync_mode must not be None")
+    need(
+        str(radio.get("modulation_type")) in ("2-FSK", "GFSK"),
+        "set modulation_type: 2-FSK",
+    )
+    need(not radio.get("manchester", False), "manchester must be off")
+    need(not radio.get("crc_enable", False), "crc_enable must be off")
+    need(not radio.get("whitening", False), "whitening must be off")
+
+    # Not fatal, but frames arrive corrupted.
+    if radio.get("foc_bs_cs_gate", True):
+        _LOGGER.warning(
+            "cc1101 '%s': set foc_bs_cs_gate: false. With the gate on, frequency "
+            "offset compensation and clock recovery stay frozen and Vevor frames "
+            "arrive with slipped bits",
+            name,
+        )
+    rate = radio.get("symbol_rate")
+    if rate is not None and abs(rate - MEASURED_SYMBOL_RATE) > 100:
+        _LOGGER.warning(
+            "cc1101 '%s': symbol_rate %s is off the station's ~%d baud; in packet "
+            "mode that slips bits. Use symbol_rate: %d",
+            name,
+            rate,
+            MEASURED_SYMBOL_RATE,
+            MEASURED_SYMBOL_RATE,
+        )
+
+
+def _final_validate(config):
+    for conf in config if isinstance(config, list) else [config]:
+        if CONF_CC1101_ID in conf:
+            _check_radio(conf)
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 SENSORS = {
     CONF_TEMPERATURE: "set_temperature_sensor",
@@ -134,11 +248,18 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    receiver = await cg.get_variable(config[CONF_RECEIVER_ID])
-    if hasattr(remote_base, "add_dumper"):
-        remote_base.add_dumper(receiver, var)
+    if CONF_CC1101_ID in config:
+        cg.add_define("USE_VEVOR_DECODER_CC1101")
+        radio = await cg.get_variable(config[CONF_CC1101_ID])
+        cg.add(radio.register_listener(var))
+        cg.add(var.set_packet_input(True))
     else:
-        cg.add(receiver.register_dumper(var))
+        cg.add_define("USE_VEVOR_DECODER_REMOTE_RECEIVER")
+        receiver = await cg.get_variable(config[CONF_RECEIVER_ID])
+        if hasattr(remote_base, "add_dumper"):
+            remote_base.add_dumper(receiver, var)
+        else:
+            cg.add(receiver.register_dumper(var))
 
     # -1 is the "accept any station" sentinel on the C++ side.
     cg.add(var.set_sensor_id(config.get(CONF_SENSOR_ID, -1)))

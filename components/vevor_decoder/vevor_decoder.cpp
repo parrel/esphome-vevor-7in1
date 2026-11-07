@@ -1,18 +1,26 @@
 #include "vevor_decoder.h"
 
+#include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace esphome {
 namespace vevor_decoder {
 
 static const char *const TAG = "vevor_decoder";
 
-// A frame is 21 bytes: 0xAA header, 19 payload bytes, 1 checksum byte.
-static const int FRAME_BYTES = 21;
+static const uint8_t FRAME_HEADER = 0xAA;
 static const int FRAME_BITS = FRAME_BYTES * 8;  // 168
+// The checksum covers every byte before it; the second counter is the first + 1.
+static const int CHECKSUM_BYTE = 19;
+static const int COUNTER_BYTE = 18;
+static const int COUNTER_PLUS_ONE_BYTE = 20;
+
+// A burst's two copies arrive ~30 ms apart, bursts 20 s apart.
+static const uint32_t DUPLICATE_WINDOW_MS = 1000;
 
 // Sync word 0xCA 0x54, MSB first, as individual bits.
 static const uint8_t SYNC_WORD[16] = {
@@ -60,7 +68,12 @@ void VevorDecoder::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Station ID filter: 0x%04X", (unsigned) this->sensor_id_);
   }
-  ESP_LOGCONFIG(TAG, "  Bit period: %u us", (unsigned) this->bit_period_);
+  if (this->packet_input_) {
+    ESP_LOGCONFIG(TAG, "  Input: CC1101 packet mode");
+  } else {
+    ESP_LOGCONFIG(TAG, "  Input: remote_receiver");
+    ESP_LOGCONFIG(TAG, "  Bit period: %u us", (unsigned) this->bit_period_);
+  }
   ESP_LOGCONFIG(TAG, "  Rain hold on decrease: %s", YESNO(this->rain_hold_));
   ESP_LOGCONFIG(TAG, "  Illuminance plausibility filter: %s", YESNO(this->illuminance_filter_));
   LOG_SENSOR("  ", "Temperature", this->temperature_);
@@ -74,6 +87,68 @@ void VevorDecoder::dump_config() {
   LOG_BINARY_SENSOR("  ", "Battery low", this->battery_);
 }
 
+bool VevorDecoder::frame_valid_(const uint8_t *b) {
+  if (b[0] != FRAME_HEADER)
+    return false;
+
+  uint8_t checksum = 0;
+  for (int k = 0; k < CHECKSUM_BYTE; k++)
+    checksum += b[k];
+  if (checksum != b[CHECKSUM_BYTE])
+    return false;
+
+  return b[COUNTER_PLUS_ONE_BYTE] == (uint8_t) (b[COUNTER_BYTE] + 1);
+}
+
+VevorDecoder::FrameResult VevorDecoder::handle_frame_(const uint8_t *frame) {
+  const uint16_t sensor_id = (frame[2] << 8) | frame[3];
+  if (this->sensor_id_ != SENSOR_ID_ANY && sensor_id != (uint16_t) this->sensor_id_) {
+    ESP_LOGV(TAG, "Ignoring frame from station 0x%04X (filtered)", sensor_id);
+    return FrameResult::FILTERED;
+  }
+
+  const uint32_t now = millis();
+  if (this->have_last_frame_ && now - this->last_frame_ms_ < DUPLICATE_WINDOW_MS &&
+      memcmp(frame, this->last_frame_, FRAME_BYTES) == 0) {
+    ESP_LOGV(TAG, "[%04X] Second copy of the frame, already published", sensor_id);
+    return FrameResult::DUPLICATE;
+  }
+  memcpy(this->last_frame_, frame, FRAME_BYTES);
+  this->last_frame_ms_ = now;
+  this->have_last_frame_ = true;
+
+  this->publish_frame_(frame);
+  return FrameResult::PUBLISHED;
+}
+
+#ifdef USE_VEVOR_DECODER_CC1101
+void VevorDecoder::on_packet(const std::vector<uint8_t> &packet, float freq_offset, float rssi, uint8_t lqi) {
+  // Chance sync matches in noise arrive a few times a minute; the checks below
+  // reject them.
+  if (packet.size() != (size_t) FRAME_BYTES) {
+    ESP_LOGV(TAG, "Ignoring %u-byte packet, expected %d", (unsigned) packet.size(), FRAME_BYTES);
+    return;
+  }
+
+  // With inverted FSK polarity (sync 0x35 0xAB) every byte arrives inverted.
+  const uint8_t inv = packet[0] == (uint8_t) ~FRAME_HEADER ? 0xFF : 0x00;
+  uint8_t frame[FRAME_BYTES];
+  for (int k = 0; k < FRAME_BYTES; k++)
+    frame[k] = packet[k] ^ inv;
+
+  if (!frame_valid_(frame)) {
+    ESP_LOGV(TAG, "Packet rejected (RSSI %.1f dBm, LQI %u): %s", rssi, lqi, format_hex_pretty(packet).c_str());
+    return;
+  }
+
+  if (this->handle_frame_(frame) == FrameResult::PUBLISHED) {
+    ESP_LOGD(TAG, "[%02X%02X] Signal: RSSI %.1f dBm, frequency offset %+.1f kHz, LQI %u", frame[2], frame[3], rssi,
+             freq_offset / 1000.0f, lqi);
+  }
+}
+#endif
+
+#ifdef USE_VEVOR_DECODER_REMOTE_RECEIVER
 int VevorDecoder::timings_to_bits_(const std::vector<int32_t> &raw) {
   // The receiver hands us mark/space durations; the signal itself is NRZ, so
   // each duration expands into one or more bits of the same value.
@@ -110,14 +185,7 @@ bool VevorDecoder::extract_frame_(int bit_offset, uint8_t inv, uint8_t *out) {
       byte = (byte << 1) | (this->bits_[bit_offset + k * 8 + m] ^ inv);
     out[k] = byte;
   }
-
-  if (out[0] != 0xAA)
-    return false;
-
-  uint16_t checksum = 0;
-  for (int k = 0; k < FRAME_BYTES - 2; k++)
-    checksum += out[k];
-  return (checksum & 0xFF) == out[FRAME_BYTES - 2];
+  return frame_valid_(out);
 }
 
 bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
@@ -155,14 +223,7 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
       if (!this->extract_frame_(i + 16, inv, frame))
         continue;
 
-      const uint16_t sensor_id = (frame[2] << 8) | frame[3];
-      if (this->sensor_id_ != SENSOR_ID_ANY && sensor_id != (uint16_t) this->sensor_id_) {
-        ESP_LOGV(TAG, "Ignoring frame from station 0x%04X (filtered)", sensor_id);
-        return false;
-      }
-
-      this->publish_frame_(frame);
-      return true;
+      return this->handle_frame_(frame) != FrameResult::FILTERED;
     }
   }
 
@@ -187,6 +248,7 @@ bool VevorDecoder::dump(remote_base::RemoteReceiveData src) {
 #endif
   return false;
 }
+#endif  // USE_VEVOR_DECODER_REMOTE_RECEIVER
 
 void VevorDecoder::publish_frame_(const uint8_t *b) {
   const uint16_t sensor_id = (b[2] << 8) | b[3];
