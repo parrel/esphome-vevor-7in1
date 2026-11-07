@@ -85,6 +85,9 @@ void VevorDecoder::dump_config() {
   LOG_SENSOR("  ", "UV index", this->uv_);
   LOG_SENSOR("  ", "Illuminance", this->light_);
   LOG_BINARY_SENSOR("  ", "Battery low", this->battery_);
+  LOG_SENSOR("  ", "RSSI", this->rssi_);
+  LOG_SENSOR("  ", "Frequency offset", this->freq_offset_);
+  LOG_SENSOR("  ", "Link quality", this->lqi_);
 }
 
 bool VevorDecoder::frame_valid_(const uint8_t *b) {
@@ -141,10 +144,16 @@ void VevorDecoder::on_packet(const std::vector<uint8_t> &packet, float freq_offs
     return;
   }
 
-  if (this->handle_frame_(frame) == FrameResult::PUBLISHED) {
-    ESP_LOGD(TAG, "[%02X%02X] Signal: RSSI %.1f dBm, frequency offset %+.1f kHz, LQI %u", frame[2], frame[3], rssi,
-             freq_offset / 1000.0f, lqi);
-  }
+  if (this->handle_frame_(frame) != FrameResult::PUBLISHED)
+    return;
+  ESP_LOGD(TAG, "[%02X%02X] Signal: RSSI %.1f dBm, frequency offset %+.1f kHz, LQI %u", frame[2], frame[3], rssi,
+           freq_offset / 1000.0f, lqi);
+  if (this->rssi_ != nullptr)
+    this->rssi_->publish_state(rssi);
+  if (this->freq_offset_ != nullptr)
+    this->freq_offset_->publish_state(freq_offset / 1000.0f);
+  if (this->lqi_ != nullptr)
+    this->lqi_->publish_state(lqi);
 }
 #endif
 

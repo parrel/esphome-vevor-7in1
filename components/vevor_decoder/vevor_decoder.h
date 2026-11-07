@@ -51,6 +51,10 @@ class VevorDecoder : public Component
   void set_uv_index_sensor(sensor::Sensor *s) { this->uv_ = s; }
   void set_illuminance_sensor(sensor::Sensor *s) { this->light_ = s; }
   void set_battery_low_binary_sensor(binary_sensor::BinarySensor *s) { this->battery_ = s; }
+  // Packet mode only.
+  void set_rssi_sensor(sensor::Sensor *s) { this->rssi_ = s; }
+  void set_frequency_offset_sensor(sensor::Sensor *s) { this->freq_offset_ = s; }
+  void set_link_quality_sensor(sensor::Sensor *s) { this->lqi_ = s; }
 
   // Only publish frames from this station id. SENSOR_ID_ANY accepts all.
   void set_sensor_id(int32_t sensor_id) { this->sensor_id_ = sensor_id; }
@@ -101,6 +105,9 @@ class VevorDecoder : public Component
   sensor::Sensor *uv_{nullptr};
   sensor::Sensor *light_{nullptr};
   binary_sensor::BinarySensor *battery_{nullptr};
+  sensor::Sensor *rssi_{nullptr};
+  sensor::Sensor *freq_offset_{nullptr};
+  sensor::Sensor *lqi_{nullptr};
 
   int32_t sensor_id_{SENSOR_ID_ANY};
   bool packet_input_{false};
